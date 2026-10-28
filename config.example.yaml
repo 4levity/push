@@ -1,0 +1,47 @@
+# push configuration.
+#
+# push reads this file at startup and on SIGHUP (`systemctl reload push`).
+# An invalid file is rejected and the previous configuration keeps running.
+#
+# Token hashes: run `push gen-token` to produce a raw token and its sha256
+# hash. Only the hash goes in this file; give the raw token to the client or
+# consumer over a secure channel.
+
+# Bind address for the public client-facing service (behind the reverse
+# proxy; the proxy terminates TLS and adds X-Forwarded-For). Required.
+client_listen: "0.0.0.0:80"
+
+# Bind address for the local consumer-facing service (no proxy in front;
+# bind it to an internal interface and/or firewall it). Required.
+consumer_listen: "10.0.0.5:8000"
+
+# IP addresses (or CIDRs) of the trusted reverse proxy(ies). Only requests
+# whose source address is one of these get their X-Forwarded-For header
+# honored (leftmost valid entry); everyone else is recorded by source
+# address. Empty list: X-Forwarded-For is never honored.
+forwarder_ips:
+  - "203.113.10"
+  # - "198.51.100.0/24"
+
+# Maximum size in bytes of a status payload. Default: 102400 (100 KiB).
+max_status_bytes: 102400
+
+# Basic per-client-IP rate limit on the client service (fixed window).
+# Omit the whole section to disable.
+rate_limit:
+  enabled: true
+  max_requests: 60
+  window: "1m" # Go duration: 30s, 5m, 1h, ...
+
+# Status senders. Name: letters, numbers and dashes (no leading/trailing
+# dash). token_sha256: 64 hex chars, from `push gen-token`.
+clients:
+  - name: sensor-1
+    token_sha256: "REPLACE_WITH_OUTPUT_OF_push_GEN-TOKEN"
+  - name: backup-box
+    token_sha256: "REPLACE_WITH_OUTPUT_OF_push_GEN-TOKEN"
+
+# Status readers. Any authenticated consumer can read every client.
+consumers:
+  - name: dashboard
+    token_sha256: "REPLACE_WITH_OUTPUT_OF_push_GEN-TOKEN"

@@ -1,0 +1,33 @@
+---
+# Installs push on the hosts in the "push" group.
+#
+#   1. Build the binary first:  make build
+#   2. Configure hosts in inventory (see inventory.example.ini)
+#   3. Override the push_* variables below (or in group_vars/) with real
+#      tokens:  push gen-token
+#
+#   ansible-playbook -i inventory.ini playbook.yml
+#
+- name: Install and configure push
+  hosts: push
+  become: true
+  vars:
+    push_client_listen: "0.0.0.0:80"
+    push_consumer_listen: "10.0.0.5:8000"
+    push_forwarder_ips:
+      - "203.113.10"
+    push_rate_limit_enabled: true
+    push_rate_limit_max_requests: 60
+    push_rate_limit_window: 1m
+    push_clients:
+      - name: sensor-1
+        token_sha256: "REPLACE_WITH_OUTPUT_OF_push_GEN-TOKEN"
+    push_consumers:
+      - name: dashboard
+        token_sha256: "REPLACE_WITH_OUTPUT_OF_push_GEN-TOKEN"
+    # Optional: restrict the consumer port to these source IPs via ufw.
+    # Empty list = no ufw rule is managed.
+    push_consumer_allow_sources:
+      - "10.0.0.0/8"
+  roles:
+    - push

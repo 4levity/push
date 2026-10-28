@@ -1,0 +1,23 @@
+# Managed by ansible - do not edit by hand.
+# Regenerate with: ansible-playbook -i inventory.ini playbook.yml
+client_listen: "{{ push_client_listen }}"
+consumer_listen: "{{ push_consumer_listen }}"
+forwarder_ips:
+{% for ip in push_forwarder_ips %}
+  - "{{ ip }}"
+{% endfor %}
+max_status_bytes: {{ push_max_status_bytes }}
+rate_limit:
+  enabled: {{ push_rate_limit_enabled | lower }}
+  max_requests: {{ push_rate_limit_max_requests }}
+  window: "{{ push_rate_limit_window }}"
+clients:
+{% for c in push_clients %}
+  - name: "{{ c.name }}"
+    token_sha256: "{{ c.token_sha256 }}"
+{% endfor %}
+consumers:
+{% for c in push_consumers %}
+  - name: "{{ c.name }}"
+    token_sha256: "{{ c.token_sha256 }}"
+{% endfor %}

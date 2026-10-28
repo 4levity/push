@@ -1,0 +1,28 @@
+[Unit]
+Description=push - client status receiver and consumer service
+Documentation=man:push(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User={{ push_user }}
+Group={{ push_user }}
+ExecStart={{ push_binary_dest }} run --config {{ push_config_dir }}/push.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2
+SyslogIdentifier=push
+# Non-root; needs CAP_NET_BIND_SERVICE only when a bind port is < 1024.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,60 @@
+---
+- name: Create push system user
+  ansible.builtin.user:
+    name: "{{ push_user }}"
+    system: true
+    shell: /usr/sbin/nologin
+    home: /nonexistent
+
+- name: Install push binary
+  ansible.builtin.copy:
+    src: "{{ push_binary_src }}"
+    dest: "{{ push_binary_dest }}"
+    owner: root
+    group: root
+    mode: "0755"
+  notify: restart push
+
+- name: Create config directory
+  ansible.builtin.file:
+    path: "{{ push_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ push_user }}"
+    mode: "0750"
+
+- name: Install push config
+  ansible.builtin.template:
+    src: push.yaml.j2
+    dest: "{{ push_config_dir }}/push.yaml"
+    owner: root
+    group: "{{ push_user }}"
+    mode: "0640"
+    validate: "{{ push_binary_dest }} validate --config %s"
+  notify: reload push
+
+- name: Install systemd unit
+  ansible.builtin.template:
+    src: push.service.j2
+    dest: /etc/systemd/system/push.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - daemon reload systemd
+    - restart push
+
+- name: Enable and start push
+  ansible.builtin.systemd:
+    name: push
+    enabled: true
+    state: started
+
+- name: Restrict consumer port with ufw
+  ansible.builtin.ufw:
+    rule: allow
+    src: "{{ item }}"
+    port: "{{ push_consumer_listen | regex_replace('^.+:', '') }}"
+    proto: tcp
+  loop: "{{ push_consumer_allow_sources }}"
+  when: push_consumer_allow_sources | length > 0

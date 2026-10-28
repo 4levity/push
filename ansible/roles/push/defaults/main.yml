@@ -1,0 +1,33 @@
+---
+# push role defaults.
+
+push_user: push
+push_config_dir: /etc/push
+# Path to the prebuilt static binary (see `make build`).
+push_binary_src: "{{ playbook_dir }}/../build/push"
+push_binary_dest: /usr/local/bin/push
+
+# Bind addresses (required by push itself).
+push_client_listen: "0.0.0.0:80"
+push_consumer_listen: "0.0.0.0:8000"
+
+# Trusted reverse proxy addresses (IP or CIDR) for X-Forwarded-For handling.
+push_forwarder_ips: []
+
+# Status payload limit in bytes.
+push_max_status_bytes: 102400
+
+# Client service rate limit (fixed window per client IP).
+push_rate_limit_enabled: true
+push_rate_limit_max_requests: 60
+push_rate_limit_window: 1m
+
+# Registered clients and consumers.
+#   name: letters, numbers, dashes
+#   token_sha256: from `push gen-token`
+push_clients: []
+push_consumers: []
+
+# Optional: restrict the consumer port to these source IPs via ufw.
+# Empty list = no ufw rule is managed (firewall it yourself).
+push_consumer_allow_sources: []
