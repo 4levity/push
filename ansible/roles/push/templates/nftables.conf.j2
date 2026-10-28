@@ -1,0 +1,47 @@
+# Ansible managed
+
+# {{ inventory_hostname }}: push status service
+#
+#   {{ push_eth_iface }}: client service on port {{ push_client_listen | regex_replace('^.+:', '') }}
+#                         (behind the reverse proxy) and consumer service on
+#                         port {{ push_consumer_listen | regex_replace('^.+:', '') }}
+
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority 0; policy drop;
+
+        iif "lo" accept
+        ct state established,related accept
+        ct state invalid drop
+
+        # ssh from whatever source the upstream firewall routes here
+        iif "{{ push_eth_iface }}" tcp dport 22 accept
+
+        # client service: http on {{ push_eth_iface }}, only the allowed
+        # sources (defaults to the reverse proxy IPs)
+{% for src in push_client_allow_sources %}
+        iif "{{ push_eth_iface }}" {% if src | ipaddr('version') == 6 %}ip6{% else %}ip{% endif %} saddr {{ src }} tcp dport {{ push_client_listen | regex_replace('^.+:', '') }} accept
+{% endfor %}
+        iif "{{ push_eth_iface }}" icmp type echo-request accept
+
+        # consumer service: only the explicitly allowed sources
+{% for src in push_consumer_allow_sources %}
+        iif "{{ push_eth_iface }}" {% if src | ipaddr('version') == 6 %}ip6{% else %}ip{% endif %} saddr {{ src }} tcp dport {{ push_consumer_listen | regex_replace('^.+:', '') }} accept
+{% endfor %}
+
+        # ipv6 on {{ push_eth_iface }}: RA (SLAAC), ND and dhcpv6 server replies
+        # are multicast/untracked, like dhcp broadcasts, so policy drop
+        # would eat them. The host is v4-only today; this just keeps the
+        # interface able to auto-configure if it ever gets v6
+        iif "{{ push_eth_iface }}" icmpv6 type nd-router-advert accept
+        iif "{{ push_eth_iface }}" icmpv6 type nd-neighbor-solicit accept
+        iif "{{ push_eth_iface }}" icmpv6 type nd-neighbor-advert accept
+        iif "{{ push_eth_iface }}" udp sport 547 udp dport 546 accept
+    }
+
+    chain forward {
+        type filter hook forward priority 0; policy drop;
+    }
+}

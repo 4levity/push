@@ -4,13 +4,26 @@ package consumerapi
 
 import (
 	"log/slog"
+	"net"
 	"net/http"
 	"push/internal/config"
 	"push/internal/httpjson"
 	"push/internal/logsafe"
+	"push/internal/ratelimit"
 	"push/internal/store"
 	"strings"
 	"time"
+)
+
+// LimitRequests and LimitWindow are the per-source rate limit applied to
+// every request on the consumer port. The port has no proxy in front, so the
+// direct TCP source is the only identity; the limit is deliberately generous
+// (legitimate consumers may issue hundreds of requests per second) — its
+// purpose is to cap a hostile or misbehaving internal host (service DoS and
+// log flooding), not to meter normal traffic.
+const (
+	LimitRequests = 500
+	LimitWindow   = time.Second
 )
 
 // Provider supplies the active configuration.
@@ -20,30 +33,43 @@ type Provider interface {
 
 // Server is the consumer-facing HTTP handler.
 type Server struct {
-	cfg   Provider
-	store *store.Store
-	log   *slog.Logger
+	cfg     Provider
+	store   *store.Store
+	limiter *ratelimit.Limiter
+	log     *slog.Logger
 }
 
 // New builds the consumer-facing handler.
-func New(cfg Provider, st *store.Store, log *slog.Logger) http.Handler {
-	return &Server{cfg: cfg, store: st, log: log}
+func New(cfg Provider, st *store.Store, limiter *ratelimit.Limiter, log *slog.Logger) http.Handler {
+	s := &Server{cfg: cfg, store: st, limiter: limiter, log: log}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Statuses are live, per-request data; no intermediary may cache them.
+		w.Header().Set("Cache-Control", "no-store")
+		s.ServeHTTP(w, r)
+	})
 }
 
-// ServeHTTP handles:
-//
-//	GET /             -> health (200 if the service is up)
-//	GET /status       -> all client names with last status times (authenticated)
-//	GET /status/{name} -> last status for one client (authenticated)
+// sourceIP is the direct TCP source of r (host part of RemoteAddr). There is
+// no proxy on this port, so it is the true caller identity.
+func sourceIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// ServeHTTP handles GET / (health, no auth) and GET /status and
+// GET /status/{name} (authenticated).
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	// Capture the active config once so a concurrent SIGHUP reload cannot mix
 	// two configurations within a single request.
 	cfg := s.cfg.Config()
 	path := r.URL.Path
+	ip := sourceIP(r)
 
-	// Request-derived values are logged through logsafe.Sanitize so crafted
-	// input (embedded newlines, oversized paths) cannot forge or flood logs.
+	// Request-derived values are logged via logsafe.Sanitize (see logsafe).
 	logLine := func(status int) {
 		s.log.Info("consumer request",
 			"method", logsafe.Sanitize(r.Method),
@@ -51,6 +77,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			"ip", logsafe.Sanitize(r.RemoteAddr),
 			"status", status,
 			"duration_ms", time.Since(start).Milliseconds())
+	}
+
+	// The limit runs before anything else so 401/404/405 floods from one
+	// internal host are capped too.
+	if !s.limiter.Allow(ip, LimitRequests, LimitWindow) {
+		logLine(http.StatusTooManyRequests)
+		httpjson.Error(w, http.StatusTooManyRequests, "too many requests")
+		return
 	}
 
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {

@@ -94,8 +94,10 @@ consumer_listen: "0.0.0.0:8000"
 	if cfg.MaxStatusBytes != DefaultMaxStatusBytes {
 		t.Errorf("MaxStatusBytes = %d, want default %d", cfg.MaxStatusBytes, DefaultMaxStatusBytes)
 	}
-	if cfg.RateLimit.Enabled {
-		t.Error("rate limit should be disabled by default")
+	rl := cfg.RateLimit
+	if !rl.Enabled || rl.MaxRequests != DefaultRateLimitMaxRequests || rl.Window != DefaultRateLimitWindow {
+		t.Errorf("RateLimit = %+v, want enabled default %+v",
+			rl, RateLimit{Enabled: true, MaxRequests: DefaultRateLimitMaxRequests, Window: DefaultRateLimitWindow})
 	}
 	if len(cfg.Forwarders) != 0 {
 		t.Errorf("Forwarders = %v", cfg.Forwarders)
@@ -123,9 +125,13 @@ consumer_listen: "127.0.0.1:18000"
 		{"bad token hash", listens + "clients:\n  - name: ok-name\n    token_sha256: \"zzz\"\n", "token_sha256"},
 		{"duplicate client", listens + "clients:\n  - name: dup\n    token_sha256: \"" + abcHash + "\"\n  - name: dup\n    token_sha256: \"" + abcHash + "\"\n", "duplicate"},
 		{"bad forwarder", listens + "forwarder_ips:\n  - \"not-an-ip\"\n", "forwarder_ips"},
+		{"multi-document", listens + "---\nclient_listen: \"127.0.0.1:1\"\n", "one YAML document"},
+		{"whole-space forwarder", listens + "forwarder_ips:\n  - \"0.0.0.0/0\"\n", "address space"},
+		{"whole-space forwarder v6", listens + "forwarder_ips:\n  - \"::/0\"\n", "address space"},
 		{"negative max bytes", listens + "max_status_bytes: -5\n", "max_status_bytes"},
 		{"bad window", listens + "rate_limit:\n  enabled: true\n  max_requests: 5\n  window: \"soon\"\n", "window"},
 		{"enabled without max", listens + "rate_limit:\n  enabled: true\n  window: \"1m\"\n", "max_requests"},
+		{"enabled without window", listens + "rate_limit:\n  enabled: true\n  max_requests: 5\n", "window"},
 	}
 
 	for _, tc := range tests {
@@ -133,9 +139,26 @@ consumer_listen: "127.0.0.1:18000"
 			if _, err := Parse([]byte(tc.yaml)); err == nil {
 				t.Fatalf("Parse: want error containing %q, got nil", tc.want)
 			} else if !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("Parse error = %q, want it to contain %q", err, tc.want)
+				t.Fatalf("Parse error = %q, want it to contain %q", err.Error(), tc.want)
 			}
 		})
+	}
+}
+
+func TestParseRateLimitExplicitlyDisabled(t *testing.T) {
+	// An explicit `enabled: false` disables the limit even though the
+	// default (omitted section) is on.
+	cfg, err := Parse([]byte(`
+client_listen: "0.0.0.0:80"
+consumer_listen: "0.0.0.0:8000"
+rate_limit:
+  enabled: false
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.RateLimit.Enabled {
+		t.Error("rate limit should be disabled by explicit enabled: false")
 	}
 }
 

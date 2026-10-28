@@ -44,17 +44,36 @@
     - daemon reload systemd
     - restart push
 
+# Firewall first: the ruleset is in place before the service starts, so
+# the consumer port is never open without its rules.
+- name: Install nftables
+  ansible.builtin.package:
+    name: nftables
+    state: present
+
+- name: Enable nftables service
+  ansible.builtin.systemd:
+    name: nftables
+    enabled: true
+
+- name: Install nftables ruleset
+  ansible.builtin.template:
+    src: nftables.conf.j2
+    dest: /etc/nftables.conf
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Validate nftables ruleset
+  ansible.builtin.command: nft -c -f /etc/nftables.conf
+  changed_when: false
+
+- name: Apply nftables ruleset
+  ansible.builtin.command: nft -f /etc/nftables.conf
+  changed_when: true
+
 - name: Enable and start push
   ansible.builtin.systemd:
     name: push
     enabled: true
     state: started
-
-- name: Restrict consumer port with ufw
-  ansible.builtin.ufw:
-    rule: allow
-    src: "{{ item }}"
-    port: "{{ push_consumer_listen | regex_replace('^.+:', '') }}"
-    proto: tcp
-  loop: "{{ push_consumer_allow_sources }}"
-  when: push_consumer_allow_sources | length > 0

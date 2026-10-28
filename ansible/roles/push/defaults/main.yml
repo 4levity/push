@@ -30,6 +30,18 @@ push_rate_limit_window: 1m
 push_clients: []
 push_consumers: []
 
-# Optional: restrict the consumer port to these source IPs via ufw.
-# Empty list = no ufw rule is managed (firewall it yourself).
+# Primary network interface of the host (nftables ruleset).
+push_eth_iface: eth0
+
+# Sources allowed to reach the client port on the primary interface
+# (nftables ruleset). Defaults to push_forwarder_ips: only the reverse
+# proxy may talk to the client port, so nobody can skip the proxy (and its
+# TLS) by connecting directly. Set an explicit list to widen; an empty list
+# makes the port unreachable.
+push_client_allow_sources: "{{ push_forwarder_ips }}"
+
+# Optional: sources allowed to reach the consumer port (nftables ruleset).
+# Keep this to the exact consumer host(s) (one /32 per host); an empty list
+# makes the port unreachable from any source (loopback still works if the
+# service is bound there).
 push_consumer_allow_sources: []

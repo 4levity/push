@@ -43,16 +43,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ip := xff.ClientIP(r, cfg.Forwarders)
 
 	name := ""
-	// Request-derived values are logged through logsafe.Sanitize so crafted
-	// input (embedded newlines, oversized paths) cannot forge or flood logs.
-	logLine := func(status int) {
+	// Request-derived values are logged via logsafe.Sanitize (see logsafe).
+	logLine := func(status int, extra ...any) {
 		s.log.Info("client request",
-			"method", logsafe.Sanitize(r.Method),
-			"path", logsafe.Sanitize(r.URL.Path),
-			"client", logsafe.Sanitize(name),
-			"ip", logsafe.Sanitize(ip),
-			"status", status,
-			"duration_ms", time.Since(start).Milliseconds())
+			append([]any{
+				"method", logsafe.Sanitize(r.Method),
+				"path", logsafe.Sanitize(r.URL.Path),
+				"client", logsafe.Sanitize(name),
+				"ip", logsafe.Sanitize(ip),
+				"status", status,
+				"duration_ms", time.Since(start).Milliseconds(),
+			}, extra...)...)
+	}
+
+	// The rate limit runs first so every request from a source IP counts,
+	// not only POSTs: a non-POST flood (405) must not bypass the limit.
+	if cfg.RateLimit.Enabled && !s.limiter.Allow(ip, cfg.RateLimit.MaxRequests, cfg.RateLimit.Window) {
+		logLine(http.StatusTooManyRequests)
+		httpjson.Error(w, http.StatusTooManyRequests, "too many requests")
+		return
 	}
 
 	if r.Method != http.MethodPost {
@@ -62,15 +71,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if cfg.RateLimit.Enabled && !s.limiter.Allow(ip, cfg.RateLimit.MaxRequests, cfg.RateLimit.Window) {
-		logLine(http.StatusTooManyRequests)
-		httpjson.Error(w, http.StatusTooManyRequests, "too many requests")
-		return
-	}
-
-	// The path must be exactly "/<name>": one leading slash, the client name,
-	// and nothing else. Non-canonical forms (missing leading slash, trailing
-	// or repeated slashes) are rejected rather than normalized away.
+	// The path must be exactly "/<name>"; non-canonical forms are rejected,
+	// not normalized.
 	if !strings.HasPrefix(r.URL.Path, "/") {
 		logLine(http.StatusNotFound)
 		httpjson.Error(w, http.StatusNotFound, "not found")
@@ -83,18 +85,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, known := cfg.Client(name); !known {
-		logLine(http.StatusNotFound)
-		httpjson.Error(w, http.StatusNotFound, "unknown client")
-		return
-	}
-
-	if !cfg.VerifyClientToken(name, r.Header.Get("X-Client-Token")) {
-		logLine(http.StatusUnauthorized)
-		httpjson.Error(w, http.StatusUnauthorized, "invalid client token")
-		return
-	}
-
+	// The body is read before the token check on purpose, bounded by
+	// max_status_bytes: an oversized or unreadable body is rejected with the
+	// same response whether or not the token is valid, and nothing larger
+	// than the limit is ever loaded or parsed (chunked or not). Any residual
+	// timing difference (the token hash) is deliberately not defended.
 	r.Body = http.MaxBytesReader(w, r.Body, cfg.MaxStatusBytes)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -108,9 +103,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpjson.Error(w, http.StatusBadRequest, "could not read request body")
 		return
 	}
+
+	if !cfg.VerifyClientToken(name, r.Header.Get("X-Client-Token")) {
+		// Unknown client and invalid token are indistinguishable on purpose:
+		// the request is dropped (nothing stored) but reported as accepted,
+		// so callers cannot enumerate client names.
+		logLine(http.StatusOK, "dropped", "auth")
+		httpjson.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
+
 	if !json.Valid(raw) {
-		logLine(http.StatusBadRequest)
-		httpjson.Error(w, http.StatusBadRequest, "status must be valid JSON")
+		// 200, same as the unauthenticated case: the body must not reveal
+		// that the token was valid.
+		logLine(http.StatusOK, "dropped", "body")
+		httpjson.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
 

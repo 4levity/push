@@ -1,6 +1,7 @@
 package ratelimit
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -60,5 +61,29 @@ func TestSweep(t *testing.T) {
 	l.Sweep(2 * time.Minute)
 	if l.Len() != 1 {
 		t.Fatalf("Sweep removed a fresh entry, len=%d", l.Len())
+	}
+}
+
+func TestStartSweeper(t *testing.T) {
+	var nowPtr atomic.Pointer[time.Time]
+	t0 := time.Now()
+	nowPtr.Store(&t0)
+	l := New()
+	l.now = func() time.Time { return *nowPtr.Load() }
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go l.StartSweeper(5*time.Millisecond, func() time.Duration { return time.Second }, stop)
+
+	l.Allow("a", 5, time.Second)
+	later := t0.Add(5 * time.Second) // bucket now older than the window
+	nowPtr.Store(&later)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for l.Len() != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if l.Len() != 0 {
+		t.Fatalf("sweeper left %d entries", l.Len())
 	}
 }

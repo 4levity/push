@@ -21,12 +21,13 @@ const shutdownTimeout = 10 * time.Second
 
 // App owns the live configuration, the status store and both HTTP servers.
 type App struct {
-	cfg      atomic.Pointer[config.Config]
-	store    *store.Store
-	limiter  *ratelimit.Limiter
-	log      *slog.Logger
-	client   *http.Server
-	consumer *http.Server
+	cfg             atomic.Pointer[config.Config]
+	store           *store.Store
+	limiter         *ratelimit.Limiter
+	consumerLimiter *ratelimit.Limiter
+	log             *slog.Logger
+	client          *http.Server
+	consumer        *http.Server
 }
 
 // New loads the config file at path and builds a ready-to-run App.
@@ -35,7 +36,7 @@ func New(path string, log *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &App{store: store.New(), limiter: ratelimit.New(), log: log}
+	a := &App{store: store.New(), limiter: ratelimit.New(), consumerLimiter: ratelimit.New(), log: log}
 	a.cfg.Store(cfg)
 	return a, nil
 }
@@ -73,9 +74,8 @@ func reloadNotes(old, next *config.Config) []string {
 }
 
 // Run serves both HTTP services until ctx is cancelled or a listener fails.
-// It binds both listeners before serving so that a bind failure on either
-// port fails fast with nothing left running, and so the "listening" log
-// lines are only emitted once the sockets are actually bound.
+// Both listeners are bound before serving so a bind failure fails fast with
+// nothing left running.
 func (a *App) Run(ctx context.Context) error {
 	cfg := a.Config()
 
@@ -87,15 +87,13 @@ func (a *App) Run(ctx context.Context) error {
 		IdleTimeout:       60 * time.Second,
 	}
 	a.consumer = &http.Server{
-		Handler:           consumerapi.New(a, a.store, a.log),
+		Handler:           consumerapi.New(a, a.store, a.consumerLimiter, a.log),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 
-	// Long-lived listeners are bound once and live for the process lifetime;
-	// a context is not meaningful for the Listen call itself.
 	clientLn, err := net.Listen("tcp", cfg.ClientListen) //nolint:noctx // long-lived listener
 	if err != nil {
 		return fmt.Errorf("listen client %s: %w", cfg.ClientListen, err)
@@ -119,7 +117,13 @@ func (a *App) Run(ctx context.Context) error {
 
 	sweeperStop := make(chan struct{})
 	defer close(sweeperStop)
-	go a.limiter.StartSweeper(time.Minute, 24*time.Hour, sweeperStop)
+	go a.limiter.StartSweeper(time.Minute, func() time.Duration {
+		return a.Config().RateLimit.Window
+	}, sweeperStop)
+	// The consumer limit is a fixed constant, not a config value.
+	go a.consumerLimiter.StartSweeper(time.Minute, func() time.Duration {
+		return consumerapi.LimitWindow
+	}, sweeperStop)
 
 	select {
 	case err := <-errCh:

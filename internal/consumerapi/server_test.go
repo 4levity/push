@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"push/internal/config"
+	"push/internal/ratelimit"
 	"push/internal/store"
 	"push/internal/token"
 	"strings"
@@ -23,7 +24,9 @@ func (f *fakeProvider) Config() *config.Config { return f.cfg.Load() }
 
 const consumerToken = "consumer-secret"
 
-func newTestServer(t *testing.T) *Server {
+// newTestServer returns the handler exactly as New builds it (including the
+// Cache-Control wrapper), so the tests exercise the served handler.
+func newTestServer(t *testing.T) http.Handler {
 	t.Helper()
 	f := &fakeProvider{}
 	f.cfg.Store(&config.Config{
@@ -46,10 +49,10 @@ func newTestServer(t *testing.T) *Server {
 		Status:   []byte(`{"ok":true}`),
 	})
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(f, st, log).(*Server)
+	return New(f, st, ratelimit.New(), log)
 }
 
-func (srv *Server) doGet(t *testing.T, path, authHeader string) *httptest.ResponseRecorder {
+func doGet(t *testing.T, h http.Handler, path, authHeader string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, path, nil)
 	req.RemoteAddr = "127.0.0.1:5555"
@@ -57,7 +60,7 @@ func (srv *Server) doGet(t *testing.T, path, authHeader string) *httptest.Respon
 		req.Header.Set("Authorization", authHeader)
 	}
 	rec := httptest.NewRecorder()
-	srv.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, req)
 	return rec
 }
 
@@ -70,7 +73,7 @@ func checkStatus(t *testing.T, rec *httptest.ResponseRecorder, want int) {
 
 func TestHealth(t *testing.T) {
 	srv := newTestServer(t)
-	rec := srv.doGet(t, "/", "")
+	rec := doGet(t, srv, "/", "")
 	checkStatus(t, rec, http.StatusOK)
 	if !strings.Contains(rec.Body.String(), `"ok"`) {
 		t.Errorf("body = %s", rec.Body.String())
@@ -79,11 +82,11 @@ func TestHealth(t *testing.T) {
 
 func TestListAuth(t *testing.T) {
 	srv := newTestServer(t)
-	checkStatus(t, srv.doGet(t, "/status", ""), http.StatusUnauthorized)
-	checkStatus(t, srv.doGet(t, "/status", "Bearer wrong"), http.StatusUnauthorized)
-	checkStatus(t, srv.doGet(t, "/status", "Token "+consumerToken), http.StatusUnauthorized)
+	checkStatus(t, doGet(t, srv, "/status", ""), http.StatusUnauthorized)
+	checkStatus(t, doGet(t, srv, "/status", "Bearer wrong"), http.StatusUnauthorized)
+	checkStatus(t, doGet(t, srv, "/status", "Token "+consumerToken), http.StatusUnauthorized)
 
-	rec := srv.doGet(t, "/status", "Bearer "+consumerToken)
+	rec := doGet(t, srv, "/status", "Bearer "+consumerToken)
 	checkStatus(t, rec, http.StatusOK)
 
 	var out struct {
@@ -108,7 +111,7 @@ func TestListAuth(t *testing.T) {
 
 func TestSingleStatus(t *testing.T) {
 	srv := newTestServer(t)
-	rec := srv.doGet(t, "/status/alpha", "Bearer "+consumerToken)
+	rec := doGet(t, srv, "/status/alpha", "Bearer "+consumerToken)
 	checkStatus(t, rec, http.StatusOK)
 
 	var got store.Status
@@ -128,7 +131,7 @@ func TestSingleStatus(t *testing.T) {
 
 func TestSingleNoStatusYet(t *testing.T) {
 	srv := newTestServer(t)
-	rec := srv.doGet(t, "/status/beta", "Bearer "+consumerToken)
+	rec := doGet(t, srv, "/status/beta", "Bearer "+consumerToken)
 	checkStatus(t, rec, http.StatusNotFound)
 	if !strings.Contains(rec.Body.String(), "no status recorded yet") {
 		t.Errorf("body = %s", rec.Body.String())
@@ -137,14 +140,14 @@ func TestSingleNoStatusYet(t *testing.T) {
 
 func TestSingleUnknownClient(t *testing.T) {
 	srv := newTestServer(t)
-	rec := srv.doGet(t, "/status/ghost", "Bearer "+consumerToken)
+	rec := doGet(t, srv, "/status/ghost", "Bearer "+consumerToken)
 	checkStatus(t, rec, http.StatusNotFound)
 }
 
 func TestSingleBadPath(t *testing.T) {
 	srv := newTestServer(t)
 	for _, path := range []string{"/status/", "/status/bad_name", "/status/a/b"} {
-		rec := srv.doGet(t, path, "Bearer "+consumerToken)
+		rec := doGet(t, srv, path, "Bearer "+consumerToken)
 		checkStatus(t, rec, http.StatusNotFound)
 	}
 }
@@ -152,13 +155,55 @@ func TestSingleBadPath(t *testing.T) {
 func TestMethodNotAllowed(t *testing.T) {
 	srv := newTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+	req.RemoteAddr = "127.0.0.1:5555"
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
 	checkStatus(t, rec, http.StatusMethodNotAllowed)
 }
 
+func TestCacheControlNoStore(t *testing.T) {
+	srv := newTestServer(t)
+	// The header must be set on every response, including errors.
+	for _, tc := range []struct{ path, auth string }{
+		{"/", ""},
+		{"/status", ""},
+		{"/status/alpha", "Bearer " + consumerToken},
+	} {
+		rec := doGet(t, srv, tc.path, tc.auth)
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Errorf("%s: Cache-Control = %q, want no-store", tc.path, got)
+		}
+	}
+}
+
+// The consumer port must cap floods from a single source IP (the port has
+// no proxy in front, so the TCP source is the identity). The limit is
+// generous; the test lowers nothing and just checks the boundary.
+func TestRateLimit(t *testing.T) {
+	srv := newTestServer(t)
+	for i := 0; i < LimitRequests; i++ {
+		rec := doGet(t, srv, "/", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d, want 200", i+1, rec.Code)
+		}
+	}
+	rec := doGet(t, srv, "/", "")
+	checkStatus(t, rec, http.StatusTooManyRequests)
+
+	// A different source is unaffected.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "10.0.0.9:1234"
+	rec2 := httptest.NewRecorder()
+	srv.ServeHTTP(rec2, req)
+	checkStatus(t, rec2, http.StatusOK)
+
+	// Auth failures from the limited source also count (no bypass via 401).
+	rec3 := doGet(t, srv, "/status", "")
+	checkStatus(t, rec3, http.StatusTooManyRequests)
+}
+
 func TestUnknownPath(t *testing.T) {
 	srv := newTestServer(t)
-	checkStatus(t, srv.doGet(t, "/nope", "Bearer "+consumerToken), http.StatusNotFound)
-	checkStatus(t, srv.doGet(t, "/statusx", "Bearer "+consumerToken), http.StatusNotFound)
+	checkStatus(t, doGet(t, srv, "/nope", "Bearer "+consumerToken), http.StatusNotFound)
+	checkStatus(t, doGet(t, srv, "/statusx", "Bearer "+consumerToken), http.StatusNotFound)
 }

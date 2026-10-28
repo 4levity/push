@@ -12,6 +12,8 @@ ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2
 SyslogIdentifier=push
+# Public port: raise the fd ceiling above the distro default (~1024).
+LimitNOFILE=8192
 # Non-root; needs CAP_NET_BIND_SERVICE only when a bind port is < 1024.
 NoNewPrivileges=true
 ProtectSystem=strict

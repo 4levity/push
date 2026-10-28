@@ -16,9 +16,16 @@ client_listen: "0.0.0.0:80"
 consumer_listen: "10.0.0.5:8000"
 
 # IP addresses (or CIDRs) of the trusted reverse proxy(ies). Only requests
-# whose source address is one of these get their X-Forwarded-For header
-# honored (leftmost valid entry); everyone else is recorded by source
-# address. Empty list: X-Forwarded-For is never honored.
+# sourced from one of these get their X-Forwarded-For honored (rightmost
+# valid entry that is not itself a forwarder); everyone else is recorded by
+# source address. Empty list: X-Forwarded-For is never honored. 0.0.0.0/0
+# and ::/0 are rejected.
+#
+# Use the proxy's own source IP(s) only, as narrow as possible. The
+# rightmost-not-a-forwarder rule assumes the proxy's appended entry (the
+# client's true address) is not itself a forwarder: if a real client sits
+# inside one of these CIDRs, its true address is skipped and a
+# client-forged header entry may win.
 forwarder_ips:
   - "203.113.10.1"
   # - "198.51.100.0/24"
@@ -26,8 +33,10 @@ forwarder_ips:
 # Maximum size in bytes of a status payload. Default: 102400 (100 KiB).
 max_status_bytes: 102400
 
-# Basic per-client-IP rate limit on the client service (fixed window).
-# Omit the whole section to disable.
+# Per-client-IP rate limit on the client service (fixed window), applied to
+# every request before anything else. Omitting the whole section keeps the
+# limit ON with these defaults (60 requests per 1m per IP); to disable it,
+# set enabled: false.
 rate_limit:
   enabled: true
   max_requests: 60

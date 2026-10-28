@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -20,6 +21,14 @@ import (
 
 // DefaultMaxStatusBytes is the default status payload limit: 100 KiB.
 const DefaultMaxStatusBytes = int64(100 * 1024)
+
+// DefaultRateLimit applies when the rate_limit section is omitted from the
+// config: a per-IP limit that is on by default. An explicit
+// `enabled: false` in the section still disables it.
+const (
+	DefaultRateLimitMaxRequests = 60
+	DefaultRateLimitWindow      = time.Minute
+)
 
 var (
 	// nameRe: one or more alphanumerics, optionally followed by dash+alphanumerics.
@@ -61,27 +70,22 @@ type Consumer struct {
 	TokenSHA256 string // lowercase hex
 }
 
-// IsForwarder reports whether ip is one of the configured reverse proxies.
-func (c *Config) IsForwarder(ip netip.Addr) bool {
-	for _, p := range c.Forwarders {
-		if p.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
 // Client returns the registered client with the given name.
 func (c *Config) Client(name string) (Client, bool) {
 	cl, ok := c.Clients[name]
 	return cl, ok
 }
 
+// dummyTokenHash is compared against for unknown clients so verification
+// takes the same time regardless of whether the name exists (no timing
+// oracle on client names).
+const dummyTokenHash = "0000000000000000000000000000000000000000000000000000000000000000"
+
 // VerifyClientToken reports whether raw is the client token for name.
 func (c *Config) VerifyClientToken(name, raw string) bool {
 	cl, ok := c.Clients[name]
 	if !ok {
-		return false
+		cl = Client{TokenSHA256: dummyTokenHash}
 	}
 	return token.Matches(cl.TokenSHA256, raw)
 }
@@ -99,8 +103,6 @@ func (c *Config) VerifyConsumerToken(raw string) bool {
 
 // Load reads and validates the config file at path.
 func Load(path string) (*Config, error) {
-	// path is operator-supplied (the -config flag / env var), not untrusted
-	// request input, so variable-path file inclusion is not a risk here.
 	data, err := os.ReadFile(path) //nolint:gosec // operator-supplied path
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
@@ -114,6 +116,17 @@ func Parse(data []byte) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	if err := dec.Decode(&rc); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	// A second Decode must hit EOF: a multi-document file would otherwise
+	// silently ignore everything after the first document. Probe into `any`
+	// (a mapping target) so a real second document decodes cleanly and only
+	// end-of-stream yields io.EOF.
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("parse config: only one YAML document per file is allowed")
+		}
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	return validate(rc)
@@ -180,23 +193,34 @@ func validate(rc rawConfig) (*Config, error) {
 		}
 	}
 
-	if rc.RateLimit != nil {
-		rl := RateLimit{Enabled: rc.RateLimit.Enabled, MaxRequests: rc.RateLimit.MaxRequests}
-		if rc.RateLimit.Window == "" {
-			add("rate_limit.window is required when the rate_limit section is present")
-		} else {
-			d, err := time.ParseDuration(rc.RateLimit.Window)
-			switch {
-			case err != nil:
-				add("rate_limit.window %q: invalid duration (examples: 30s, 5m, 1h)", rc.RateLimit.Window)
-			case d <= 0:
-				add("rate_limit.window must be positive")
-			default:
-				rl.Window = d
-			}
+	switch {
+	case rc.RateLimit == nil:
+		// No rate_limit section: the per-IP limit stays on with the defaults
+		// (1 request/second per IP). Disabling requires `enabled: false`.
+		cfg.RateLimit = RateLimit{
+			Enabled:     true,
+			MaxRequests: DefaultRateLimitMaxRequests,
+			Window:      DefaultRateLimitWindow,
 		}
-		if rl.Enabled && rl.MaxRequests <= 0 {
-			add("rate_limit.max_requests must be a positive number when rate_limit.enabled is true")
+	default:
+		rl := RateLimit{Enabled: rc.RateLimit.Enabled, MaxRequests: rc.RateLimit.MaxRequests}
+		if rl.Enabled {
+			if rc.RateLimit.Window == "" {
+				add("rate_limit.window is required when rate_limit.enabled is true")
+			} else {
+				d, err := time.ParseDuration(rc.RateLimit.Window)
+				switch {
+				case err != nil:
+					add("rate_limit.window %q: invalid duration (examples: 30s, 5m, 1h)", rc.RateLimit.Window)
+				case d <= 0:
+					add("rate_limit.window must be positive")
+				default:
+					rl.Window = d
+				}
+			}
+			if rl.MaxRequests <= 0 {
+				add("rate_limit.max_requests must be a positive number when rate_limit.enabled is true")
+			}
 		}
 		cfg.RateLimit = rl
 	}
@@ -258,24 +282,33 @@ func checkListenAddr(s string) error {
 
 func parseForwarder(s string) (netip.Prefix, error) {
 	s = strings.TrimSpace(s)
+	var (
+		pfx netip.Prefix
+		err error
+	)
 	if strings.Contains(s, "/") {
-		pfx, err := netip.ParsePrefix(s)
-		if err != nil {
-			return netip.Prefix{}, fmt.Errorf("invalid IP or CIDR %q", s)
+		pfx, err = netip.ParsePrefix(s)
+		if err == nil {
+			pfx = pfx.Masked()
 		}
-		return pfx.Masked(), nil
+	} else {
+		ip, err2 := netip.ParseAddr(s)
+		if err2 != nil {
+			err = err2
+		} else {
+			// Unmap so a v4-mapped value (e.g. ::ffff:1.2.3.4) yields a /32
+			// prefix, not a /128; the bit length must be the unmapped one.
+			m := ip.Unmap()
+			pfx, err = m.Prefix(m.BitLen())
+		}
 	}
-	ip, err := netip.ParseAddr(s)
 	if err != nil {
-		return netip.Prefix{}, fmt.Errorf("invalid IP address %q", s)
+		return netip.Prefix{}, fmt.Errorf("invalid IP address or CIDR %q", s)
 	}
-	// Unmap first so a v4-mapped value (e.g. ::ffff:1.2.3.4) yields a /32
-	// prefix, not a /128. The bit length must be taken from the unmapped
-	// address.
-	ip = ip.Unmap()
-	pfx, err := ip.Prefix(ip.BitLen())
-	if err != nil {
-		return netip.Prefix{}, fmt.Errorf("invalid IP address %q", s)
+	// 0.0.0.0/0 / ::/0 would make every source address a trusted forwarder
+	// and honor X-Forwarded-For from anywhere on the internet.
+	if pfx.Bits() == 0 {
+		return netip.Prefix{}, fmt.Errorf("forwarder %q: the whole address space is not allowed", s)
 	}
 	return pfx, nil
 }

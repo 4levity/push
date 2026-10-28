@@ -109,20 +109,54 @@ func TestForwarderWithoutXFF(t *testing.T) {
 	}
 }
 
-func TestAuthFailures(t *testing.T) {
-	srv, _ := newTestServer(t, 1024, config.RateLimit{})
+// The response for a well-formed path must not reveal whether the name is
+// registered or the token is valid: for the same body, unknown clients, bad
+// tokens and valid auth all get the identical response.
+func TestResponseIndependentOfAuth(t *testing.T) {
+	srv, st := newTestServer(t, 10, config.RateLimit{})
 
-	rec := srv.doPost(t, "/sensor-1", `{}`, "203.0.113.9:1", "", "wrong-token")
-	checkStatus(t, rec, http.StatusUnauthorized)
+	for _, tc := range []struct {
+		name  string
+		path  string
+		body  string
+		token string
+	}{
+		{"wrong token, invalid body", "/sensor-1", "not json", "wrong-token"},
+		{"missing token, invalid body", "/sensor-1", "not json", ""},
+		{"unknown client, invalid body", "/ghost", "not json", "client-secret"},
+		{"valid auth, invalid body", "/sensor-1", "not json", "client-secret"},
+		{"valid auth, empty body", "/sensor-1", "", "client-secret"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := srv.doPost(t, tc.path, tc.body, "203.0.113.9:1", "", tc.token)
+			checkStatus(t, rec, http.StatusOK)
+			if !strings.Contains(rec.Body.String(), `"ok":true`) {
+				t.Errorf("body = %s, want ok:true", rec.Body.String())
+			}
+		})
+	}
+	if _, ok := st.Get("sensor-1"); ok {
+		t.Fatal("dropped status must not be stored")
+	}
 
-	rec = srv.doPost(t, "/sensor-1", `{}`, "203.0.113.9:1", "", "")
-	checkStatus(t, rec, http.StatusUnauthorized)
-}
-
-func TestUnknownClient(t *testing.T) {
-	srv, _ := newTestServer(t, 1024, config.RateLimit{})
-	rec := srv.doPost(t, "/ghost", `{}`, "203.0.113.9:1", "", "client-secret")
-	checkStatus(t, rec, http.StatusNotFound)
+	// Oversized body (11 > 10): 413 for everyone, nothing stored.
+	for _, tc := range []struct {
+		name  string
+		path  string
+		token string
+	}{
+		{"wrong token", "/sensor-1", "wrong-token"},
+		{"unknown client", "/ghost", "client-secret"},
+		{"valid auth", "/sensor-1", "client-secret"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := srv.doPost(t, tc.path, "12345678901", "203.0.113.9:1", "", tc.token)
+			checkStatus(t, rec, http.StatusRequestEntityTooLarge)
+		})
+	}
+	if _, ok := st.Get("sensor-1"); ok {
+		t.Fatal("oversized status must not be stored")
+	}
 }
 
 func TestMethodNotAllowed(t *testing.T) {
@@ -175,30 +209,6 @@ func TestNonCanonicalPaths(t *testing.T) {
 	checkStatus(t, rec, http.StatusOK)
 }
 
-func TestTooLarge(t *testing.T) {
-	srv, st := newTestServer(t, 10, config.RateLimit{})
-	rec := srv.doPost(t, "/sensor-1", "12345678901", "203.0.113.9:1", "", "client-secret") // 11 bytes of valid JSON
-	checkStatus(t, rec, http.StatusRequestEntityTooLarge)
-	if _, ok := st.Get("sensor-1"); ok {
-		t.Fatal("oversized status should not be stored")
-	}
-}
-
-func TestInvalidJSON(t *testing.T) {
-	srv, st := newTestServer(t, 1024, config.RateLimit{})
-	rec := srv.doPost(t, "/sensor-1", "not json", "203.0.113.9:1", "", "client-secret")
-	checkStatus(t, rec, http.StatusBadRequest)
-	if _, ok := st.Get("sensor-1"); ok {
-		t.Fatal("invalid status should not be stored")
-	}
-}
-
-func TestEmptyBody(t *testing.T) {
-	srv, _ := newTestServer(t, 1024, config.RateLimit{})
-	rec := srv.doPost(t, "/sensor-1", "", "203.0.113.9:1", "", "client-secret")
-	checkStatus(t, rec, http.StatusBadRequest)
-}
-
 func TestRateLimit(t *testing.T) {
 	rl := config.RateLimit{Enabled: true, MaxRequests: 2, Window: time.Minute}
 	srv, _ := newTestServer(t, 1024, rl)
@@ -213,6 +223,24 @@ func TestRateLimit(t *testing.T) {
 	// a different IP is unaffected
 	rec = srv.doPost(t, "/sensor-1", `{}`, "203.0.113.10:1", "", "client-secret")
 	checkStatus(t, rec, http.StatusOK)
+}
+
+// Non-POST requests count against the limit too: a GET/PUT flood (which
+// would get 405) must not bypass the limiter.
+func TestRateLimitAppliesToNonPost(t *testing.T) {
+	rl := config.RateLimit{Enabled: true, MaxRequests: 2, Window: time.Minute}
+	srv, _ := newTestServer(t, 1024, rl)
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/sensor-1", nil)
+		req.RemoteAddr = "203.0.113.9:1"
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		checkStatus(t, rec, http.StatusMethodNotAllowed)
+	}
+	// Third request from the same IP is rejected even as a valid POST.
+	rec := srv.doPost(t, "/sensor-1", `{}`, "203.0.113.9:1", "", "client-secret")
+	checkStatus(t, rec, http.StatusTooManyRequests)
 }
 
 func TestRateLimitDisabled(t *testing.T) {

@@ -60,14 +60,17 @@ func (l *Limiter) Sweep(maxAge time.Duration) {
 	}
 }
 
-// StartSweeper runs Sweep every interval until stop is closed.
-func (l *Limiter) StartSweeper(interval, maxAge time.Duration, stop <-chan struct{}) {
+// StartSweeper runs Sweep(maxAge()) every interval until stop is closed.
+// maxAge is a function so the caller can supply the currently configured
+// window, keeping each entry for exactly as long as its window can be (also
+// correct when the window changes on a reload).
+func (l *Limiter) StartSweeper(interval time.Duration, maxAge func() time.Duration, stop <-chan struct{}) {
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
 		select {
 		case <-t.C:
-			l.Sweep(maxAge)
+			l.Sweep(maxAge())
 		case <-stop:
 			return
 		}

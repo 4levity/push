@@ -14,20 +14,28 @@
   vars:
     push_client_listen: "0.0.0.0:80"
     push_consumer_listen: "10.0.0.5:8000"
+    # Primary network interface (nftables ruleset).
+    push_eth_iface: eth0
     push_forwarder_ips:
       - "203.113.10.1"
     push_rate_limit_enabled: true
     push_rate_limit_max_requests: 60
     push_rate_limit_window: 1m
+    # Clients may only reach the client port from these sources (nftables).
+    # Defaults to push_forwarder_ips (the proxy only), so direct
+    # non-TLS connections that skip the proxy are dropped; set explicitly
+    # to widen.
+    # push_client_allow_sources:
+    #   - "203.113.10.1/32"
     push_clients:
       - name: sensor-1
         token_sha256: "REPLACE_WITH_OUTPUT_OF_push_GEN-TOKEN"
     push_consumers:
       - name: dashboard
         token_sha256: "REPLACE_WITH_OUTPUT_OF_push_GEN-TOKEN"
-    # Optional: restrict the consumer port to these source IPs via ufw.
-    # Empty list = no ufw rule is managed.
+    # Sources allowed to reach the consumer port (nftables): the dashboard
+    # host only, as a single /32.
     push_consumer_allow_sources:
-      - "10.0.0.0/8"
+      - "10.0.0.10/32"
   roles:
     - push

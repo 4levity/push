@@ -33,11 +33,15 @@ consumers ──HTTP:8000────────────────▶ pus
 | item | value |
 |---|---|
 | Header | `X-Client-Token: <raw token>` |
-| Body | any valid JSON, at most `max_status_bytes` (default 100 KiB) |
+| Body | any valid JSON, at most `max_status_bytes` (default 100 KiB); chunked transfer is fine |
 
-The request is accepted (HTTP 200) only if the client name is known, the
-token matches, and the body is valid JSON within the size limit. The status
-is stored with the reception time (UTC) and the client's true IP:
+For a well-formed request (exact `/{name}` path with a valid name) the
+response never reveals whether the name is registered or the token is
+valid: an oversized body gets `413` and everything else gets `200`,
+regardless of name or token. The status is stored only if the client name
+is known, the token matches, and the body is valid JSON within the size
+limit; otherwise the request is silently dropped. The stored status
+carries the reception time (UTC) and the client's true IP:
 
 - If the request's **source address is a configured `forwarder_ips` entry**
   (IP or CIDR): the **rightmost valid IP in `X-Forwarded-For` that is not
@@ -47,9 +51,11 @@ is stored with the reception time (UTC) and the client's true IP:
   such IP, the forwarder's source address is used.
 - Otherwise the source address is used and `X-Forwarded-For` is ignored.
 
-Responses: `200` ok · `400` invalid JSON · `401` bad/missing token ·
-`404` unknown client or bad path · `405` wrong method · `413` body over
-limit · `429` rate limit.
+Responses: `200` ok or silently dropped · `400` unreadable body · `413`
+body over limit · `404` malformed path (not a possible client name) ·
+`405` wrong method · `429` rate limit. The rate limit applies to *every*
+request from a source IP — including wrong-method and malformed-path
+requests — so no request type can bypass it.
 
 ```sh
 curl -X POST https://push.example.com/sensor-1 \
@@ -61,7 +67,10 @@ curl -X POST https://push.example.com/sensor-1 \
 ### Consumer API (port 8000, local)
 
 All endpoints except health require `Authorization: Bearer <raw token>`
-matching a configured consumer.
+matching a configured consumer. Every response carries
+`Cache-Control: no-store`, and every request is rate-limited per source IP
+(500 requests/second, before authentication), so a hostile internal host
+can neither flood the service nor hammer the auth endpoint.
 
 | endpoint | auth | response |
 |---|---|---|
@@ -99,14 +108,13 @@ See [config.example.yaml](config.example.yaml) for a commented example.
 | `consumer_listen` | yes | – | bind address, `host:port`, local consumer service |
 | `forwarder_ips` | no | empty | trusted proxy IPs/CIDRs; only their requests honor `X-Forwarded-For` |
 | `max_status_bytes` | no | `102400` | max status payload in bytes |
-| `rate_limit.enabled` | no | `false` | enable per-IP fixed-window limit on the client service |
-| `rate_limit.max_requests` | no | – | max requests per client IP per window |
-| `rate_limit.window` | no | – | window, Go duration (`30s`, `5m`, `1h`) |
+| `rate_limit` | no | enabled: `60` requests / `1m` per IP | per-IP fixed-window limit on the client service, applied to every request (`enabled: false` disables it) |
 | `clients` | no | empty | list of `{name, token_sha256}` |
 | `consumers` | no | empty | list of `{name, token_sha256}` |
 
-Unknown YAML keys are rejected. `token_sha256` is the lowercase 64-hex-char
-SHA-256 of the raw token.
+Unknown YAML keys, multiple YAML documents, and whole-address-space
+forwarders (`0.0.0.0/0`, `::/0`) are rejected. `token_sha256` is the
+lowercase 64-hex-char SHA-256 of the raw token.
 
 ### Managing tokens
 
@@ -137,6 +145,9 @@ Requires Go ≥ 1.23. The only dependency is `gopkg.in/yaml.v3`.
 make build        # static binary at build/push
 make test         # go test -race ./...
 make lint         # golangci-lint (installs v2.15.0 to GOPATH/bin if missing)
+
+# The example config only passes validation once its placeholder token
+# hashes are replaced (push gen-token):
 ./build/push validate --config config.example.yaml
 ./build/push run --config config.example.yaml
 ```
@@ -149,17 +160,19 @@ installs it automatically if it is not already on your `PATH` or in
 ## Installing with ansible (Debian VM or LXC)
 
 The ansible role ships a prebuilt static binary (no Go toolchain needed on
-the target), creates a `push` system user, installs the config and a
-systemd unit, and enables the service.
+the target), creates a `push` system user, installs an nftables ruleset,
+the config and a systemd unit, and enables the service.
 
 ```sh
 make build                                     # 1. build the binary
 cp ansible/inventory.example.ini inventory.ini # 2. point it at your host(s)
 # 3. set real values in ansible/playbook.yml vars:
 #      push_client_listen / push_consumer_listen
+#      push_eth_iface (the host's primary interface, for the firewall)
 #      push_forwarder_ips  (your proxy's source IP as seen by the host)
+#      push_client_allow_sources (who may reach port 80; default: the forwarders)
 #      push_clients / push_consumers (push gen-token output)
-#      push_consumer_allow_sources (optional ufw sources for port 8000)
+#      push_consumer_allow_sources (who may reach port 8000; one /32 per consumer host)
 ansible-playbook -i inventory.ini ansible/playbook.yml   # 4. install
 ```
 
@@ -167,24 +180,42 @@ Operational notes:
 
 - Runs non-root with `AmbientCapabilities=CAP_NET_BIND_SERVICE` (needed for
   port 80). If you bind only ports ≥ 1024, the capability is harmless.
+- The role installs an nftables ruleset (policy drop: loopback, ssh, the
+  client port only for `push_client_allow_sources` — default: the forwarder
+  IPs, so clients cannot skip the proxy and its TLS — and the consumer port
+  only for `push_consumer_allow_sources`) and applies it **before** the
+  service is started, so neither service port is ever open without its
+  rules. Set `push_eth_iface` if the primary interface is not `eth0`. If
+  the host previously ran ufw, disable it first: the ruleset replaces it.
 - The config file is `0640 root:push`. The consumer port has no proxy in
-  front of it: bind it to an internal interface (e.g. `10.0.0.5:8000`) and/or
-  firewall it. Setting `push_consumer_allow_sources` adds matching ufw
-  rules.
+  front of it: bind it to an internal interface (e.g. `10.0.0.5:8000`).
+  With no `push_consumer_allow_sources` entries it is unreachable from any
+  source.
 - Log output goes to the journal: `journalctl -u push -f`.
 
 ## Security notes
 
 - Only token hashes are stored in the config; verification is
   SHA-256 + constant-time compare.
+- Client names and tokens cannot be probed: for a well-formed path the
+  response depends only on the body (oversized → `413`, otherwise `200`),
+  never on the name or token, and unknown names are checked against a dummy
+  hash so verification timing is uniform as well.
 - `X-Forwarded-For` is honored **only** for requests sourced from
-  `forwarder_ips`; all other requests are recorded by source address, so
-  spoofed headers from the open internet cannot fake a client's IP. For
-  forwarder-sourced requests the rightmost non-forwarder entry is used, so a
-  client that prepends forged entries cannot override the source IP recorded
-  by the last (trusted) hop.
+  `forwarder_ips` (rightmost-entry rule, see Client API); everyone else is
+  recorded by source address, so spoofed headers from the open internet
+  cannot fake a client's IP. Keep the forwarder list narrow (the proxy's
+  own IPs): the rule assumes the proxy's appended entry — the client's
+  true address — is not itself a forwarder.
 - The rate limit on the client port is applied per resolved client IP
-  before token checking (brute-force protection).
+  before anything else, to every request regardless of method or path
+  (on by default: 60 requests/minute per IP; brute-force and DoS
+  protection).
+- The consumer port rate-limits every request per source IP (500
+  requests/second, before authentication) and answers with
+  `Cache-Control: no-store`; combined with the firewall allow-list this
+  caps what a compromised internal host can do there (token brute force
+  remains infeasible: 256-bit tokens, constant-time compare).
 - Statuses live in memory only; a restart loses them (a later version may
   forward to a datastore).
 - Anyone who can read a consumer token can read all client statuses.

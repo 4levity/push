@@ -8,11 +8,14 @@ import (
 func TestSanitizeStripsControlChars(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"plain path", "plain path"},
-		{"a\nb", "a b"},   // newline (log-injection vector) -> space
-		{"a\rb", "a b"},   // carriage return -> space
-		{"a\tb", "a b"},   // tab -> space
-		{"a\x00b", "a b"}, // NUL -> space
-		{"a\x7fb", "a b"}, // DEL -> space
+		{"a\nb", "a b"},     // newline (log-injection vector) -> space
+		{"a\rb", "a b"},     // carriage return -> space
+		{"a\tb", "a b"},     // tab -> space
+		{"a\x00b", "a b"},   // NUL -> space
+		{"a\x7fb", "a b"},   // DEL -> space
+		{"a\u0085b", "a b"}, // NEL (C1 control) -> space
+		{"a\u2028b", "a b"}, // line separator -> space
+		{"a\u2029b", "a b"}, // paragraph separator -> space
 		{"no controls", "no controls"},
 		{"", ""},
 		{"unicode é ü preserved", "unicode é ü preserved"},
