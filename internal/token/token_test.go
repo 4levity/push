@@ -52,7 +52,7 @@ func TestGenerate(t *testing.T) {
 	if _, err := hex.DecodeString(a); err != nil {
 		t.Errorf("token is not hex: %v", err)
 	}
-	if Hash(a) != Hash(a) {
+	if h1, h2 := Hash(a), Hash(a); h1 != h2 {
 		t.Error("Hash not deterministic")
 	}
 	if Matches(Hash(a), b) {

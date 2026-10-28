@@ -136,9 +136,15 @@ Requires Go ≥ 1.23. The only dependency is `gopkg.in/yaml.v3`.
 ```sh
 make build        # static binary at build/push
 make test         # go test -race ./...
+make lint         # golangci-lint (installs v2.15.0 to GOPATH/bin if missing)
 ./build/push validate --config config.example.yaml
 ./build/push run --config config.example.yaml
 ```
+
+Linting uses [`golangci-lint`](https://golangci-lint.run/) v2, configured in
+`.golangci.yml` (gosec, bodyclose, noctx, staticcheck, gofumpt, …). `make lint`
+installs it automatically if it is not already on your `PATH` or in
+`GOPATH/bin`.
 
 ## Installing with ansible (Debian VM or LXC)
 

@@ -9,14 +9,13 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"push/internal/token"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
-
-	"push/internal/token"
 )
 
 // DefaultMaxStatusBytes is the default status payload limit: 100 KiB.
@@ -100,7 +99,9 @@ func (c *Config) VerifyConsumerToken(raw string) bool {
 
 // Load reads and validates the config file at path.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	// path is operator-supplied (the -config flag / env var), not untrusted
+	// request input, so variable-path file inclusion is not a risk here.
+	data, err := os.ReadFile(path) //nolint:gosec // operator-supplied path
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
@@ -185,11 +186,12 @@ func validate(rc rawConfig) (*Config, error) {
 			add("rate_limit.window is required when the rate_limit section is present")
 		} else {
 			d, err := time.ParseDuration(rc.RateLimit.Window)
-			if err != nil {
+			switch {
+			case err != nil:
 				add("rate_limit.window %q: invalid duration (examples: 30s, 5m, 1h)", rc.RateLimit.Window)
-			} else if d <= 0 {
+			case d <= 0:
 				add("rate_limit.window must be positive")
-			} else {
+			default:
 				rl.Window = d
 			}
 		}

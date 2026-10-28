@@ -8,15 +8,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"strings"
-	"time"
-
 	"push/internal/config"
 	"push/internal/httpjson"
 	"push/internal/logsafe"
 	"push/internal/ratelimit"
 	"push/internal/store"
 	"push/internal/xff"
+	"strings"
+	"time"
 )
 
 // Provider supplies the active configuration.

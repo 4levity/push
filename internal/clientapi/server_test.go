@@ -8,15 +8,14 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
-	"strings"
-	"sync/atomic"
-	"testing"
-	"time"
-
 	"push/internal/config"
 	"push/internal/ratelimit"
 	"push/internal/store"
 	"push/internal/token"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
 )
 
 type fakeProvider struct {

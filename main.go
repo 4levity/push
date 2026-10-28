@@ -9,11 +9,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"syscall"
-
 	"push/internal/app"
 	"push/internal/config"
 	"push/internal/token"
+	"syscall"
 )
 
 // version is set at build time via -ldflags "-X main.version=...".
@@ -65,7 +64,9 @@ func run(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cfgPath := fs.String("config", "/etc/push/push.yaml", "path to the config file")
 	logFormat := fs.String("log-format", "json", "log format: json or text")
-	fs.Parse(args)
+	// flag.ExitOnError prints usage and exits on a parse error, so Parse
+	// never returns a non-nil error here.
+	_ = fs.Parse(args)
 
 	log := newLogger(*logFormat)
 
@@ -121,7 +122,8 @@ func genToken() error {
 func validate(args []string) error {
 	fs := flag.NewFlagSet("validate", flag.ExitOnError)
 	cfgPath := fs.String("config", "/etc/push/push.yaml", "path to the config file")
-	fs.Parse(args)
+	// flag.ExitOnError exits on a parse error, so Parse returns nil here.
+	_ = fs.Parse(args)
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {

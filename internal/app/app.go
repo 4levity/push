@@ -8,14 +8,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"sync/atomic"
-	"time"
-
 	"push/internal/clientapi"
 	"push/internal/config"
 	"push/internal/consumerapi"
 	"push/internal/ratelimit"
 	"push/internal/store"
+	"sync/atomic"
+	"time"
 )
 
 const shutdownTimeout = 10 * time.Second
@@ -62,12 +61,12 @@ func (a *App) Reload(path string) error {
 }
 
 // reloadNotes reports changes that do not take effect until a restart.
-func reloadNotes(old, new *config.Config) []string {
+func reloadNotes(old, next *config.Config) []string {
 	var notes []string
-	if old.ClientListen != new.ClientListen {
+	if old.ClientListen != next.ClientListen {
 		notes = append(notes, "client_listen changed; restart push to bind the new address")
 	}
-	if old.ConsumerListen != new.ConsumerListen {
+	if old.ConsumerListen != next.ConsumerListen {
 		notes = append(notes, "consumer_listen changed; restart push to bind the new address")
 	}
 	return notes
@@ -95,13 +94,15 @@ func (a *App) Run(ctx context.Context) error {
 		IdleTimeout:       60 * time.Second,
 	}
 
-	clientLn, err := net.Listen("tcp", cfg.ClientListen)
+	// Long-lived listeners are bound once and live for the process lifetime;
+	// a context is not meaningful for the Listen call itself.
+	clientLn, err := net.Listen("tcp", cfg.ClientListen) //nolint:noctx // long-lived listener
 	if err != nil {
 		return fmt.Errorf("listen client %s: %w", cfg.ClientListen, err)
 	}
-	consumerLn, err := net.Listen("tcp", cfg.ConsumerListen)
+	consumerLn, err := net.Listen("tcp", cfg.ConsumerListen) //nolint:noctx // long-lived listener
 	if err != nil {
-		clientLn.Close()
+		_ = clientLn.Close() // best-effort cleanup; the Listen error is what we return
 		return fmt.Errorf("listen consumer %s: %w", cfg.ConsumerListen, err)
 	}
 

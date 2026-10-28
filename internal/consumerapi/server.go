@@ -5,13 +5,12 @@ package consumerapi
 import (
 	"log/slog"
 	"net/http"
-	"strings"
-	"time"
-
 	"push/internal/config"
 	"push/internal/httpjson"
 	"push/internal/logsafe"
 	"push/internal/store"
+	"strings"
+	"time"
 )
 
 // Provider supplies the active configuration.

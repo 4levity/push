@@ -6,14 +6,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"push/internal/config"
+	"push/internal/store"
+	"push/internal/token"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"push/internal/config"
-	"push/internal/store"
-	"push/internal/token"
 )
 
 type fakeProvider struct {
@@ -24,7 +23,7 @@ func (f *fakeProvider) Config() *config.Config { return f.cfg.Load() }
 
 const consumerToken = "consumer-secret"
 
-func newTestServer(t *testing.T) (*Server, *store.Store) {
+func newTestServer(t *testing.T) *Server {
 	t.Helper()
 	f := &fakeProvider{}
 	f.cfg.Store(&config.Config{
@@ -47,7 +46,7 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 		Status:   []byte(`{"ok":true}`),
 	})
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(f, st, log).(*Server), st
+	return New(f, st, log).(*Server)
 }
 
 func (srv *Server) doGet(t *testing.T, path, authHeader string) *httptest.ResponseRecorder {
@@ -70,7 +69,7 @@ func checkStatus(t *testing.T, rec *httptest.ResponseRecorder, want int) {
 }
 
 func TestHealth(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv := newTestServer(t)
 	rec := srv.doGet(t, "/", "")
 	checkStatus(t, rec, http.StatusOK)
 	if !strings.Contains(rec.Body.String(), `"ok"`) {
@@ -79,7 +78,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestListAuth(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv := newTestServer(t)
 	checkStatus(t, srv.doGet(t, "/status", ""), http.StatusUnauthorized)
 	checkStatus(t, srv.doGet(t, "/status", "Bearer wrong"), http.StatusUnauthorized)
 	checkStatus(t, srv.doGet(t, "/status", "Token "+consumerToken), http.StatusUnauthorized)
@@ -108,7 +107,7 @@ func TestListAuth(t *testing.T) {
 }
 
 func TestSingleStatus(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv := newTestServer(t)
 	rec := srv.doGet(t, "/status/alpha", "Bearer "+consumerToken)
 	checkStatus(t, rec, http.StatusOK)
 
@@ -128,7 +127,7 @@ func TestSingleStatus(t *testing.T) {
 }
 
 func TestSingleNoStatusYet(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv := newTestServer(t)
 	rec := srv.doGet(t, "/status/beta", "Bearer "+consumerToken)
 	checkStatus(t, rec, http.StatusNotFound)
 	if !strings.Contains(rec.Body.String(), "no status recorded yet") {
@@ -137,13 +136,13 @@ func TestSingleNoStatusYet(t *testing.T) {
 }
 
 func TestSingleUnknownClient(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv := newTestServer(t)
 	rec := srv.doGet(t, "/status/ghost", "Bearer "+consumerToken)
 	checkStatus(t, rec, http.StatusNotFound)
 }
 
 func TestSingleBadPath(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv := newTestServer(t)
 	for _, path := range []string{"/status/", "/status/bad_name", "/status/a/b"} {
 		rec := srv.doGet(t, path, "Bearer "+consumerToken)
 		checkStatus(t, rec, http.StatusNotFound)
@@ -151,7 +150,7 @@ func TestSingleBadPath(t *testing.T) {
 }
 
 func TestMethodNotAllowed(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv := newTestServer(t)
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
 	rec := httptest.NewRecorder()
 	srv.ServeHTTP(rec, req)
@@ -159,7 +158,7 @@ func TestMethodNotAllowed(t *testing.T) {
 }
 
 func TestUnknownPath(t *testing.T) {
-	srv, _ := newTestServer(t)
+	srv := newTestServer(t)
 	checkStatus(t, srv.doGet(t, "/nope", "Bearer "+consumerToken), http.StatusNotFound)
 	checkStatus(t, srv.doGet(t, "/statusx", "Bearer "+consumerToken), http.StatusNotFound)
 }
