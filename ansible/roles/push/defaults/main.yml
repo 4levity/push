@@ -9,7 +9,9 @@ push_binary_dest: /usr/local/bin/push
 
 # Bind addresses (required by push itself).
 push_client_listen: "0.0.0.0:80"
-push_consumer_listen: "0.0.0.0:8000"
+# Safe default: loopback only. Override with an internal interface (e.g.
+# 10.0.0.5:8000) when consumers live on other hosts; see the playbook.
+push_consumer_listen: "127.0.0.1:8000"
 
 # Trusted reverse proxy addresses (IP or CIDR) for X-Forwarded-For handling.
 push_forwarder_ips: []

@@ -243,9 +243,12 @@ func checkListenAddr(s string) error {
 	if err != nil || n < 1 || n > 65535 {
 		return fmt.Errorf("invalid port %q", port)
 	}
-	if host != "" && !strings.Contains(host, ".") {
+	// The host must be empty (bind all interfaces) or a valid IP address.
+	// Hostnames are rejected: a bind address that depends on DNS resolution
+	// is surprising and can change under the service.
+	if host != "" {
 		if _, err := netip.ParseAddr(host); err != nil {
-			return fmt.Errorf("invalid address %q", host)
+			return fmt.Errorf("invalid address %q: must be an IP address", host)
 		}
 	}
 	return nil
@@ -264,7 +267,11 @@ func parseForwarder(s string) (netip.Prefix, error) {
 	if err != nil {
 		return netip.Prefix{}, fmt.Errorf("invalid IP address %q", s)
 	}
-	pfx, err := ip.Unmap().Prefix(ip.BitLen())
+	// Unmap first so a v4-mapped value (e.g. ::ffff:1.2.3.4) yields a /32
+	// prefix, not a /128. The bit length must be taken from the unmapped
+	// address.
+	ip = ip.Unmap()
+	pfx, err := ip.Prefix(ip.BitLen())
 	if err != nil {
 		return netip.Prefix{}, fmt.Errorf("invalid IP address %q", s)
 	}

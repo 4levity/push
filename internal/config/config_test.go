@@ -160,6 +160,43 @@ func TestLoadMissingFile(t *testing.T) {
 	}
 }
 
+func TestCheckListenAddr(t *testing.T) {
+	ok := []string{"127.0.0.1:8000", "0.0.0.0:80", "[::1]:8000", ":8000"}
+	for _, s := range ok {
+		if err := checkListenAddr(s); err != nil {
+			t.Errorf("checkListenAddr(%q) = %v, want nil", s, err)
+		}
+	}
+	// Invalid dotted "IPs" and hostnames must be rejected, not accepted just
+	// because they contain a dot. Bare IPv6 (no brackets) is also rejected,
+	// matching net.Listen.
+	bad := []string{"999.999.999.999:80", "myhost.example.com:80", "10.0.0.256:80", "::1:8000", "127.0.0.1:0", "127.0.0.1:99999", "127.0.0.1", "no-port-here"}
+	for _, s := range bad {
+		if err := checkListenAddr(s); err == nil {
+			t.Errorf("checkListenAddr(%q) = nil, want error", s)
+		}
+	}
+}
+
+func TestParseForwarderV4Mapped(t *testing.T) {
+	// A v4-mapped IPv6 forwarder must resolve to a /32, not be rejected.
+	pfx, err := parseForwarder("::ffff:203.0.113.7")
+	if err != nil {
+		t.Fatalf("parseForwarder(::ffff:203.0.113.7) = %v", err)
+	}
+	want := netip.MustParsePrefix("203.0.113.7/32")
+	if pfx != want {
+		t.Errorf("parseForwarder = %v, want %v", pfx, want)
+	}
+	// Plain forms still work and produce the same /32.
+	if p, err := parseForwarder("203.0.113.7"); err != nil || p != want {
+		t.Errorf("parseForwarder(203.0.113.7) = %v, %v; want %v", p, err, want)
+	}
+	if _, err := parseForwarder("not-an-ip"); err == nil {
+		t.Error("parseForwarder(not-an-ip) = nil, want error")
+	}
+}
+
 func TestValidName(t *testing.T) {
 	valid := []string{"a", "sensor-1", "AB-9-x", "0"}
 	for _, s := range valid {

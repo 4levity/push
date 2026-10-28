@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync/atomic"
 	"time"
@@ -73,11 +74,13 @@ func reloadNotes(old, new *config.Config) []string {
 }
 
 // Run serves both HTTP services until ctx is cancelled or a listener fails.
+// It binds both listeners before serving so that a bind failure on either
+// port fails fast with nothing left running, and so the "listening" log
+// lines are only emitted once the sockets are actually bound.
 func (a *App) Run(ctx context.Context) error {
 	cfg := a.Config()
 
 	a.client = &http.Server{
-		Addr:              cfg.ClientListen,
 		Handler:           clientapi.New(a, a.store, a.limiter, a.log),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -85,7 +88,6 @@ func (a *App) Run(ctx context.Context) error {
 		IdleTimeout:       60 * time.Second,
 	}
 	a.consumer = &http.Server{
-		Addr:              cfg.ConsumerListen,
 		Handler:           consumerapi.New(a, a.store, a.log),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
@@ -93,14 +95,25 @@ func (a *App) Run(ctx context.Context) error {
 		IdleTimeout:       60 * time.Second,
 	}
 
+	clientLn, err := net.Listen("tcp", cfg.ClientListen)
+	if err != nil {
+		return fmt.Errorf("listen client %s: %w", cfg.ClientListen, err)
+	}
+	consumerLn, err := net.Listen("tcp", cfg.ConsumerListen)
+	if err != nil {
+		clientLn.Close()
+		return fmt.Errorf("listen consumer %s: %w", cfg.ConsumerListen, err)
+	}
+
+	a.log.Info("client service listening", "addr", cfg.ClientListen)
+	a.log.Info("consumer service listening", "addr", cfg.ConsumerListen)
+
 	errCh := make(chan error, 2)
 	go func() {
-		a.log.Info("client service listening", "addr", cfg.ClientListen)
-		errCh <- a.client.ListenAndServe()
+		errCh <- a.client.Serve(clientLn)
 	}()
 	go func() {
-		a.log.Info("consumer service listening", "addr", cfg.ConsumerListen)
-		errCh <- a.consumer.ListenAndServe()
+		errCh <- a.consumer.Serve(consumerLn)
 	}()
 
 	sweeperStop := make(chan struct{})

@@ -13,6 +13,7 @@ import (
 
 	"push/internal/config"
 	"push/internal/httpjson"
+	"push/internal/logsafe"
 	"push/internal/ratelimit"
 	"push/internal/store"
 	"push/internal/xff"
@@ -43,12 +44,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ip := xff.ClientIP(r, cfg.Forwarders)
 
 	name := ""
+	// Request-derived values are logged through logsafe.Sanitize so crafted
+	// input (embedded newlines, oversized paths) cannot forge or flood logs.
 	logLine := func(status int) {
 		s.log.Info("client request",
-			"method", r.Method,
-			"path", r.URL.Path,
-			"client", name,
-			"ip", ip,
+			"method", logsafe.Sanitize(r.Method),
+			"path", logsafe.Sanitize(r.URL.Path),
+			"client", logsafe.Sanitize(name),
+			"ip", logsafe.Sanitize(ip),
 			"status", status,
 			"duration_ms", time.Since(start).Milliseconds())
 	}
@@ -66,7 +69,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name = strings.Trim(r.URL.Path, "/")
+	// The path must be exactly "/<name>": one leading slash, the client name,
+	// and nothing else. Non-canonical forms (missing leading slash, trailing
+	// or repeated slashes) are rejected rather than normalized away.
+	if !strings.HasPrefix(r.URL.Path, "/") {
+		logLine(http.StatusNotFound)
+		httpjson.Error(w, http.StatusNotFound, "not found")
+		return
+	}
+	name = r.URL.Path[1:]
 	if name == "" || strings.Contains(name, "/") || !config.ValidName(name) {
 		logLine(http.StatusNotFound)
 		httpjson.Error(w, http.StatusNotFound, "not found")

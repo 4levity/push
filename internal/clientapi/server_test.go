@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -140,6 +141,39 @@ func TestBadNames(t *testing.T) {
 		rec := srv.doPost(t, path, `{}`, "203.0.113.9:1", "", "client-secret")
 		checkStatus(t, rec, http.StatusNotFound)
 	}
+}
+
+// postPath sends a POST whose URL.Path is set to exactly path, bypassing
+// httptest's URL parsing (which would mangle "//..." targets).
+func (srv *Server) postPath(t *testing.T, path, body, clientToken string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := &http.Request{
+		Method:     http.MethodPost,
+		URL:        &url.URL{Path: path},
+		RemoteAddr: "203.0.113.9:1",
+		Header:     http.Header{},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+	if clientToken != "" {
+		req.Header.Set("X-Client-Token", clientToken)
+	}
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	return rec
+}
+
+// Non-canonical paths must be rejected (exact "/<name>" only), not
+// normalized: trailing slashes, repeated slashes, and a missing leading
+// slash all get 404 even when they would normalize to a known client.
+func TestNonCanonicalPaths(t *testing.T) {
+	srv, _ := newTestServer(t, 1024, config.RateLimit{})
+	for _, path := range []string{"/sensor-1/", "//sensor-1", "/sensor-1//", "/", "sensor-1"} {
+		rec := srv.postPath(t, path, `{}`, "client-secret")
+		checkStatus(t, rec, http.StatusNotFound)
+	}
+	// The canonical form still works.
+	rec := srv.postPath(t, "/sensor-1", `{}`, "client-secret")
+	checkStatus(t, rec, http.StatusOK)
 }
 
 func TestTooLarge(t *testing.T) {

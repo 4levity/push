@@ -12,9 +12,17 @@ import (
 // ClientIP returns the originating client IP of r.
 //
 // If the source address is not one of the configured forwarders, the source
-// address is returned and X-Forwarded-For is ignored. Otherwise the first
-// (leftmost) valid IP in X-Forwarded-For is used; if the header is missing or
-// contains no valid IP, the forwarder's source address is returned.
+// address is returned and X-Forwarded-For is ignored.
+//
+// Otherwise the X-Forwarded-For entries are scanned from right to left and
+// the rightmost valid IP that is not itself a configured forwarder is
+// returned. This is the correct origin whether the trusted proxy appends to
+// the header (the nginx default, $proxy_add_x_forwarded_for) or replaces it,
+// and it composes across multi-proxy chains: every hop our own proxies add
+// is skipped, and a client that forges entries on the left cannot win because
+// the last proxy's appended real source address is always to the right of the
+// forged entries. If the header is missing or has no such entry, the
+// forwarder's source address is returned.
 func ClientIP(r *http.Request, forwarders []netip.Prefix) string {
 	src, ok := sourceAddr(r)
 	if !ok {
@@ -24,10 +32,21 @@ func ClientIP(r *http.Request, forwarders []netip.Prefix) string {
 		return src.String()
 	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		for _, part := range strings.Split(xff, ",") {
-			if ip, err := netip.ParseAddr(strings.TrimSpace(part)); err == nil {
-				return ip.Unmap().String()
+		parts := strings.Split(xff, ",")
+		for i := len(parts) - 1; i >= 0; i-- {
+			entry := strings.TrimSpace(parts[i])
+			if entry == "" {
+				continue
 			}
+			ip, err := netip.ParseAddr(entry)
+			if err != nil {
+				continue
+			}
+			ip = ip.Unmap()
+			if isForwarder(ip, forwarders) {
+				continue // our own proxy hop, keep looking left
+			}
+			return ip.String()
 		}
 	}
 	return src.String()

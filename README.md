@@ -40,9 +40,11 @@ token matches, and the body is valid JSON within the size limit. The status
 is stored with the reception time (UTC) and the client's true IP:
 
 - If the request's **source address is a configured `forwarder_ips` entry**
-  (IP or CIDR): the **leftmost valid IP** in `X-Forwarded-For` is used; if
-  the header is missing or has no valid IP, the forwarder's source address
-  is used.
+  (IP or CIDR): the **rightmost valid IP in `X-Forwarded-For` that is not
+  itself a configured forwarder** is used. This is correct whether the proxy
+  appends to the header (nginx default) or replaces it, and a client cannot
+  win by forging entries on the left. If the header is missing or has no
+  such IP, the forwarder's source address is used.
 - Otherwise the source address is used and `X-Forwarded-For` is ignored.
 
 Responses: `200` ok · `400` invalid JSON · `401` bad/missing token ·
@@ -171,7 +173,10 @@ Operational notes:
   SHA-256 + constant-time compare.
 - `X-Forwarded-For` is honored **only** for requests sourced from
   `forwarder_ips`; all other requests are recorded by source address, so
-  spoofed headers from the open internet cannot fake a client's IP.
+  spoofed headers from the open internet cannot fake a client's IP. For
+  forwarder-sourced requests the rightmost non-forwarder entry is used, so a
+  client that prepends forged entries cannot override the source IP recorded
+  by the last (trusted) hop.
 - The rate limit on the client port is applied per resolved client IP
   before token checking (brute-force protection).
 - Statuses live in memory only; a restart loses them (a later version may

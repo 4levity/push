@@ -20,7 +20,7 @@ consumer_listen: "10.0.0.5:8000"
 # honored (leftmost valid entry); everyone else is recorded by source
 # address. Empty list: X-Forwarded-For is never honored.
 forwarder_ips:
-  - "203.113.10"
+  - "203.113.10.1"
   # - "198.51.100.0/24"
 
 # Maximum size in bytes of a status payload. Default: 102400 (100 KiB).

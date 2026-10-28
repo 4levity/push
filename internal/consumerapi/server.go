@@ -10,6 +10,7 @@ import (
 
 	"push/internal/config"
 	"push/internal/httpjson"
+	"push/internal/logsafe"
 	"push/internal/store"
 )
 
@@ -37,13 +38,18 @@ func New(cfg Provider, st *store.Store, log *slog.Logger) http.Handler {
 //	GET /status/{name} -> last status for one client (authenticated)
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
+	// Capture the active config once so a concurrent SIGHUP reload cannot mix
+	// two configurations within a single request.
+	cfg := s.cfg.Config()
 	path := r.URL.Path
 
+	// Request-derived values are logged through logsafe.Sanitize so crafted
+	// input (embedded newlines, oversized paths) cannot forge or flood logs.
 	logLine := func(status int) {
 		s.log.Info("consumer request",
-			"method", r.Method,
-			"path", path,
-			"ip", r.RemoteAddr,
+			"method", logsafe.Sanitize(r.Method),
+			"path", logsafe.Sanitize(path),
+			"ip", logsafe.Sanitize(r.RemoteAddr),
 			"status", status,
 			"duration_ms", time.Since(start).Milliseconds())
 	}
@@ -61,11 +67,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpjson.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 
 	case path == "/status":
-		if !s.authorize(w, r) {
+		if !s.authorize(cfg, w, r) {
 			logLine(http.StatusUnauthorized)
 			return
 		}
-		cfg := s.cfg.Config()
 		names := make([]string, 0, len(cfg.Clients))
 		for n := range cfg.Clients {
 			names = append(names, n)
@@ -74,7 +79,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpjson.WriteJSON(w, http.StatusOK, map[string]any{"clients": s.store.List(names)})
 
 	case strings.HasPrefix(path, "/status/"):
-		if !s.authorize(w, r) {
+		if !s.authorize(cfg, w, r) {
 			logLine(http.StatusUnauthorized)
 			return
 		}
@@ -84,7 +89,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			httpjson.Error(w, http.StatusNotFound, "not found")
 			return
 		}
-		if _, known := s.cfg.Config().Client(name); !known {
+		if _, known := cfg.Client(name); !known {
 			logLine(http.StatusNotFound)
 			httpjson.Error(w, http.StatusNotFound, "unknown client")
 			return
@@ -109,7 +114,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // authorize checks the Bearer consumer token and writes a 401 on failure.
 // It returns true if the request is authorized.
-func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
+func (s *Server) authorize(cfg *config.Config, w http.ResponseWriter, r *http.Request) bool {
 	const realm = `Bearer realm="push"`
 	scheme, tok, ok := strings.Cut(r.Header.Get("Authorization"), " ")
 	if !ok || !strings.EqualFold(scheme, "Bearer") || tok == "" {
@@ -117,7 +122,7 @@ func (s *Server) authorize(w http.ResponseWriter, r *http.Request) bool {
 		httpjson.Error(w, http.StatusUnauthorized, "missing Bearer token in Authorization header")
 		return false
 	}
-	if !s.cfg.Config().VerifyConsumerToken(tok) {
+	if !cfg.VerifyConsumerToken(tok) {
 		w.Header().Set("WWW-Authenticate", realm)
 		httpjson.Error(w, http.StatusUnauthorized, "invalid consumer token")
 		return false

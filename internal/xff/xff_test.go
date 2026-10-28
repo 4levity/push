@@ -29,8 +29,15 @@ func TestClientIP(t *testing.T) {
 		{"non-forwarder ignores XFF", "203.0.113.9:1", "127.0.0.1, 10.1.1.1", "203.0.113.9"},
 		{"non-forwarder no XFF", "203.0.113.9:1", "", "203.0.113.9"},
 		{"forwarder single XFF", "10.0.0.5:1", "203.0.113.7", "203.0.113.7"},
-		{"forwarder multiple XFF takes leftmost", "10.0.0.5:1", "203.0.113.7, 10.1.1.1", "203.0.113.7"},
-		{"forwarder skips garbage leftmost", "10.0.0.5:1", "junk, 203.0.113.7", "203.0.113.7"},
+		// Append mode (nginx default): the client forges the leftmost entry
+		// and the trusted proxy appends the real source. The real (rightmost)
+		// non-forwarder entry must win, not the forged leftmost one.
+		{"append mode real IP beats forged leftmost", "10.0.0.5:1", "1.1.1.1, 203.0.113.7", "203.0.113.7"},
+		// Multi-proxy chain: trailing forwarder hops are skipped, the client
+		// entry to their left is returned.
+		{"skips trailing forwarder hops", "10.0.0.5:1", "203.0.113.7, 10.9.9.9", "203.0.113.7"},
+		{"skips garbage and forwarders to reach client", "10.0.0.5:1", "junk, 203.0.113.7, 10.9.9.9", "203.0.113.7"},
+		{"client forges a forwarder on the right but real source is appended", "10.0.0.5:1", "1.1.1.1, 10.9.9.9, 203.0.113.7", "203.0.113.7"},
 		{"forwarder all garbage falls back to source", "10.0.0.5:1", "junk, also-junk", "10.0.0.5"},
 		{"forwarder without XFF uses source", "10.0.0.5:1", "", "10.0.0.5"},
 		{"exact IP forwarder", "192.168.7.1:1", "203.0.113.9", "203.0.113.9"},
