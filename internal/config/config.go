@@ -193,8 +193,8 @@ func validate(rc rawConfig) (*Config, error) {
 		}
 	}
 
-	switch {
-	case rc.RateLimit == nil:
+	switch rc.RateLimit {
+	case nil:
 		// No rate_limit section: the per-IP limit stays on with the defaults
 		// (1 request/second per IP). Disabling requires `enabled: false`.
 		cfg.RateLimit = RateLimit{
