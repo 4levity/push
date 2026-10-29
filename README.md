@@ -98,6 +98,29 @@ curl -H 'Authorization: Bearer <token>' http://127.0.0.1:8000/status
 curl http://127.0.0.1:8000/            # health
 ```
 
+## Reference client
+
+For any POSIX-ish system with `cron`, `bash` and `curl`: one small script,
+[client/push.sh](client/push.sh), and one config file.
+
+Write the endpoint, the client `name` and its `token` to a file, e.g.
+`/etc/push-client.conf`:
+
+```
+url=https://push.example.com
+name=sensor-1
+token=...
+```
+
+...and add a cron line. An optional JSON file is sent as the status;
+without it the script sends `{}`:
+
+```
+* * * * * /usr/local/bin/push.sh /etc/push-client.conf /path/to/status.json
+```
+
+The script prints nothing on success; failures are left for cron to mail.
+
 ## Configuration
 
 See [config.example.yaml](config.example.yaml) for a commented example.
@@ -234,5 +257,6 @@ internal/ratelimit          fixed-window per-key limiter
 internal/xff                client IP resolution from X-Forwarded-For
 internal/token              sha256 hash/compare/generate
 internal/httpjson           JSON response helpers
+client/                     bash reference client (cron + curl)
 ansible/                    playbook + push role (Debian)
 ```
